@@ -1,0 +1,223 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: halo
+---
+# MySQL持久化存储
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: halo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi
+---
+# Halo数据持久化存储
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: halo-pvc
+  namespace: halo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+# MySQL Secret (在生产环境中请使用更安全的方式管理)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: halo
+type: Opaque
+data:
+  # 值为base64编码，此处为"halo_root_password"和"halo_password"
+  mysql-root-password: aGFsb19yb290X3Bhc3N3b3Jk
+  mysql-password: aGFsb19wYXNzd29yZA==
+  mysql-database: aGFsbw==
+  mysql-user: aGFsbw==
+---
+# MySQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: halo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: MYSQL_DATABASE
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-database
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-user
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-password
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mysql-storage
+          mountPath: /var/lib/mysql
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 15
+          periodSeconds: 5
+      volumes:
+      - name: mysql-storage
+        persistentVolumeClaim:
+          claimName: mysql-pvc
+---
+# MySQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: halo
+spec:
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# Halo Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: halo
+  namespace: halo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: halo
+  template:
+    metadata:
+      labels:
+        app: halo
+    spec:
+      containers:
+      - name: halo
+        image: halohub/halo:latest
+        env:
+        - name: SPRING_DATASOURCE_DRIVER_CLASS_NAME
+          value: "com.mysql.cj.jdbc.Driver"
+        - name: SPRING_DATASOURCE_URL
+          value: "jdbc:mysql://mysql:3306/halo?characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+        - name: SPRING_DATASOURCE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-user
+        - name: SPRING_DATASOURCE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-password
+        - name: HALO_ADMIN_PATH
+          value: "admin"
+        ports:
+        - containerPort: 8090
+        volumeMounts:
+        - name: halo-storage
+          mountPath: /root/.halo2
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8090
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8090
+          initialDelaySeconds: 30
+          periodSeconds: 5
+      volumes:
+      - name: halo-storage
+        persistentVolumeClaim:
+          claimName: halo-pvc
+---
+# Halo Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: halo
+  namespace: halo
+spec:
+  selector:
+    app: halo
+  ports:
+  - port: 80
+    targetPort: 8090
+  type: ClusterIP
+---
+# Halo Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: halo-ingress
+  namespace: halo
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: halo
+            port:
+              number: 80
